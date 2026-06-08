@@ -56,14 +56,17 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_VALIDATION;
         }
 
+        // Always show what happened before reporting any persistence problem, so
+        // the run's outcome is visible even if the state directory is broken.
+        printSummary(result);
+
         try {
             new JsonExecutionStore(stateDir).save(result);
         } catch (RuntimeException e) {
             System.err.println("error: failed to persist run state: " + e.getMessage());
             return BatchCli.EXIT_CONFIG;
         }
-
-        printSummary(result);
+        System.out.printf("%nState saved to %s%n", stateDir.toAbsolutePath());
 
         return result.succeeded() ? BatchCli.EXIT_OK : BatchCli.EXIT_FAILED;
     }
@@ -96,7 +99,5 @@ public final class RunCommand implements Callable<Integer> {
                         CliFormat.shortMessage(job.message(), 60));
             }
         }
-
-        System.out.printf("%nState saved to %s%n", stateDir.toAbsolutePath());
     }
 }

@@ -15,6 +15,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -136,6 +137,23 @@ class JsonExecutionStoreTest {
 
         // Nothing escaped the state directory.
         assertFalse(Files.exists(dir.resolve("escape.json")));
+    }
+
+    @Test
+    void skippedJobsWithNullInstantsRoundTrip(@TempDir Path dir) {
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        JobResult skipped = JobResult.skipped("b", "skipped: dependency 'a' did not succeed");
+        ExecutionResult run = new ExecutionResult("skip1", "etl", JobStatus.FAILED,
+                start, start.plusSeconds(1), List.of(skipped));
+
+        store.save(run);
+
+        JobResult loaded = store.findById("skip1").orElseThrow().result("b").orElseThrow();
+        assertEquals(JobStatus.SKIPPED, loaded.status());
+        assertEquals(JobResult.NO_EXIT_CODE, loaded.exitCode());
+        assertNull(loaded.startedAt());
+        assertNull(loaded.finishedAt());
     }
 
     @Test

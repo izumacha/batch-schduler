@@ -107,6 +107,15 @@ jobs:
 | `2`  | Validation error — the batch is structurally invalid (bad DAG, missing dependency, duplicate id, empty command, cycle). |
 | `3`  | Configuration / IO error (file missing or unparseable) or a usage error. |
 
+## Security & trust model
+
+The batch file is **trusted input**: like a `Makefile` or CI pipeline, it can run
+arbitrary commands by design, so don't run batch files from untrusted sources.
+Within that model the tool still guards against resource exhaustion (bounded YAML
+parsing, bounded job-output capture, iterative graph algorithms) and against
+escaping the state directory (run-id validation, no symlink following). See
+[docs/DESIGN.md](docs/DESIGN.md#security--trust-model) for details.
+
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture, key design decisions,

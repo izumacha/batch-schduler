@@ -139,4 +139,31 @@ class BatchConfigLoaderTest {
         assertTrue(ex.getMessage().contains("job id is required"),
                 "message should mention the validation issue, was: " + ex.getMessage());
     }
+
+    @Test
+    void yamlAliasBombIsRejected() {
+        // Classic "billion laughs": exponential alias expansion. The capped
+        // maxAliasesForCollections must reject it instead of exhausting memory.
+        String bomb = """
+                a: &a ["x","x","x","x","x","x","x","x","x"]
+                b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+                c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+                d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+                e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+                jobs: *e
+                """;
+        assertThrows(ConfigException.class, () -> loader.loadFromString(bomb));
+    }
+
+    @Test
+    void oversizedConfigFileIsRejected(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("huge.yaml");
+        // Just over the 4 MiB limit; should be rejected before being read whole.
+        byte[] filler = new byte[BatchConfigLoader.MAX_CONFIG_BYTES + 1];
+        java.util.Arrays.fill(filler, (byte) '#'); // comment bytes, still oversized
+        Files.write(file, filler);
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.load(file));
+        assertTrue(ex.getMessage().contains("too large"),
+                "message should explain the size limit, was: " + ex.getMessage());
+    }
 }

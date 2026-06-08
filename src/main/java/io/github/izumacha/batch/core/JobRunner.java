@@ -239,6 +239,10 @@ public final class JobRunner {
 
     /** Reads the combined stream, optionally echoing, keeping only the last N lines. */
     private static final class OutputCollector implements Runnable {
+        /** Cap on a single captured line so one huge line cannot exhaust memory. */
+        private static final int MAX_LINE_CHARS = 8 * 1024;
+        private static final String TRUNCATION_MARK = "…[truncated]";
+
         private final Process process;
         private final int maxLines;
         private final boolean echo;
@@ -252,24 +256,51 @@ public final class JobRunner {
 
         @Override
         public void run() {
+            // Split into lines manually (rather than BufferedReader.readLine) so a
+            // single unbounded line from a runaway process is capped instead of
+            // being read whole into memory. The full stream is still drained so the
+            // process never blocks on a full pipe.
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = br.readLine()) != null) {
-                    if (echo) {
-                        System.out.println(line);
-                    }
-                    if (maxLines > 0) {
-                        synchronized (lines) {
-                            lines.addLast(line);
-                            while (lines.size() > maxLines) {
-                                lines.removeFirst();
+                char[] buf = new char[4096];
+                StringBuilder line = new StringBuilder();
+                boolean lineTruncated = false;
+                int n;
+                while ((n = br.read(buf)) != -1) {
+                    for (int i = 0; i < n; i++) {
+                        char c = buf[i];
+                        if (c == '\n') {
+                            emit(line.toString());
+                            line.setLength(0);
+                            lineTruncated = false;
+                        } else if (c != '\r' && !lineTruncated) {
+                            line.append(c);
+                            if (line.length() >= MAX_LINE_CHARS) {
+                                line.append(TRUNCATION_MARK);
+                                lineTruncated = true;
                             }
                         }
                     }
                 }
+                if (line.length() > 0) {
+                    emit(line.toString());
+                }
             } catch (IOException e) {
                 // Stream closed (e.g. process destroyed); nothing more to read.
+            }
+        }
+
+        private void emit(String line) {
+            if (echo) {
+                System.out.println(line);
+            }
+            if (maxLines > 0) {
+                synchronized (lines) {
+                    lines.addLast(line);
+                    while (lines.size() > maxLines) {
+                        lines.removeFirst();
+                    }
+                }
             }
         }
 

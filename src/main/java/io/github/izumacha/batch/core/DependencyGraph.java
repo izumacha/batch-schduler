@@ -6,13 +6,16 @@ import io.github.izumacha.batch.model.Job;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
@@ -110,55 +113,66 @@ public final class DependencyGraph {
     private static void detectCycles(Map<String, Integer> declarationIndex,
                                      Map<String, Set<String>> dependencies,
                                      List<String> errors) {
-        // 0 = unvisited, 1 = in progress (on the current DFS stack), 2 = done.
+        // 0 = unvisited, 1 = in progress (on the current DFS path), 2 = done.
+        // Iterative DFS (explicit stacks) so a deeply-nested or very long
+        // dependency chain cannot overflow the call stack.
         Map<String, Integer> state = new HashMap<>();
         Set<String> reportedCycles = new HashSet<>();
         // Iterate in declaration order for deterministic cycle reporting.
-        for (String id : declarationIndex.keySet()) {
-            if (state.getOrDefault(id, 0) == 0) {
-                dfsCycle(id, dependencies, state, new ArrayDeque<>(), reportedCycles, errors);
+        for (String start : declarationIndex.keySet()) {
+            if (state.getOrDefault(start, 0) != 0) {
+                continue;
+            }
+            Deque<Iterator<String>> iterators = new ArrayDeque<>();
+            Deque<String> path = new ArrayDeque<>(); // top = node currently being explored
+
+            state.put(start, 1);
+            path.push(start);
+            iterators.push(dependencies.getOrDefault(start, Set.of()).iterator());
+
+            while (!iterators.isEmpty()) {
+                Iterator<String> it = iterators.peek();
+                if (it.hasNext()) {
+                    String dep = it.next();
+                    int depState = state.getOrDefault(dep, 0);
+                    if (depState == 0) {
+                        state.put(dep, 1);
+                        path.push(dep);
+                        iterators.push(dependencies.getOrDefault(dep, Set.of()).iterator());
+                    } else if (depState == 1) {
+                        // Back-edge: dep is on the current path. Extract the cycle.
+                        reportCycle(dep, path, reportedCycles, errors);
+                    }
+                } else {
+                    iterators.pop();
+                    state.put(path.pop(), 2);
+                }
             }
         }
     }
 
-    private static void dfsCycle(String node,
-                                 Map<String, Set<String>> dependencies,
-                                 Map<String, Integer> state,
-                                 Deque<String> stack,
-                                 Set<String> reportedCycles,
-                                 List<String> errors) {
-        state.put(node, 1);
-        stack.push(node);
-        for (String dep : dependencies.getOrDefault(node, Set.of())) {
-            int depState = state.getOrDefault(dep, 0);
-            if (depState == 0) {
-                dfsCycle(dep, dependencies, state, stack, reportedCycles, errors);
-            } else if (depState == 1) {
-                // Found a back-edge: dep is on the current stack. Extract the cycle.
-                List<String> path = new ArrayList<>();
-                boolean collecting = false;
-                // stack is top-first; iterate to find 'dep' as the cycle start.
-                List<String> stackList = new ArrayList<>(stack);
-                // stackList is top (current node) -> ... -> root
-                for (int i = stackList.size() - 1; i >= 0; i--) {
-                    String s = stackList.get(i);
-                    if (s.equals(dep)) {
-                        collecting = true;
-                    }
-                    if (collecting) {
-                        path.add(s);
-                    }
-                }
-                // path is now dep -> ... -> node (root-to-top within the cycle).
-                path.add(dep);
-                String canonical = canonicalCycleKey(path);
-                if (reportedCycles.add(canonical)) {
-                    errors.add("dependency cycle detected: " + String.join(" -> ", path));
-                }
+    /** Records the cycle closed by a back-edge to {@code dep} from the current DFS path. */
+    private static void reportCycle(String dep,
+                                    Deque<String> path,
+                                    Set<String> reportedCycles,
+                                    List<String> errors) {
+        // path is top-first: [current, ..., dep, ...]. Collect current..dep, then
+        // reverse to dep..current and close the loop with dep.
+        List<String> collected = new ArrayList<>();
+        for (String node : path) {
+            collected.add(node);
+            if (node.equals(dep)) {
+                break;
             }
         }
-        stack.pop();
-        state.put(node, 2);
+        List<String> cycle = new ArrayList<>(collected.size() + 1);
+        for (int i = collected.size() - 1; i >= 0; i--) {
+            cycle.add(collected.get(i));
+        }
+        cycle.add(dep);
+        if (reportedCycles.add(canonicalCycleKey(cycle))) {
+            errors.add("dependency cycle detected: " + String.join(" -> ", cycle));
+        }
     }
 
     /** Produces a rotation-independent key so a cycle is reported only once. */
@@ -202,29 +216,25 @@ public final class DependencyGraph {
             }
         }
 
-        // Ready set ordered by declaration index for determinism.
-        List<String> ready = new ArrayList<>();
+        // Ready set ordered by declaration index for determinism. A priority
+        // queue keeps the ordering as nodes become ready without re-sorting and
+        // without O(n) head removals.
+        PriorityQueue<String> ready =
+                new PriorityQueue<>(Comparator.comparingInt(declarationIndex::get));
         for (String id : declarationIndex.keySet()) {
             if (inDegree.get(id) == 0) {
                 ready.add(id);
             }
         }
-        ready.sort((a, b) -> Integer.compare(declarationIndex.get(a), declarationIndex.get(b)));
 
         List<Job> order = new ArrayList<>();
         while (!ready.isEmpty()) {
-            String id = ready.remove(0);
+            String id = ready.poll();
             order.add(batch.job(id).orElseThrow());
-            List<String> newlyReady = new ArrayList<>();
             for (String dependent : dependents.get(id)) {
-                int d = inDegree.merge(dependent, -1, Integer::sum);
-                if (d == 0) {
-                    newlyReady.add(dependent);
+                if (inDegree.merge(dependent, -1, Integer::sum) == 0) {
+                    ready.add(dependent);
                 }
-            }
-            if (!newlyReady.isEmpty()) {
-                ready.addAll(newlyReady);
-                ready.sort((a, b) -> Integer.compare(declarationIndex.get(a), declarationIndex.get(b)));
             }
         }
 

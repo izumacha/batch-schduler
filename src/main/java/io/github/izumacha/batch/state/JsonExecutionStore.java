@@ -1,13 +1,16 @@
 package io.github.izumacha.batch.state;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.izumacha.batch.model.ExecutionResult;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -39,7 +42,9 @@ public final class JsonExecutionStore implements ExecutionStore {
         this.mapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-                .enable(SerializationFeature.INDENT_OUTPUT);
+                .enable(SerializationFeature.INDENT_OUTPUT)
+                // Tolerate fields written by newer versions (forward compatibility).
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         try {
             Files.createDirectories(baseDir);
         } catch (IOException e) {
@@ -89,11 +94,13 @@ public final class JsonExecutionStore implements ExecutionStore {
             return Optional.empty();
         }
         Path file = fileFor(runId);
-        if (!Files.isRegularFile(file)) {
+        // Do not follow symlinks: only read a regular file that lives directly in
+        // the state directory, never a link an attacker may have swapped in.
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             return Optional.empty();
         }
-        try {
-            return Optional.of(mapper.readValue(file.toFile(), ExecutionResult.class));
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.of(mapper.readValue(in, ExecutionResult.class));
         } catch (IOException e) {
             throw new UncheckedIOException(
                     "failed to read execution result '" + runId + "' from " + file, e);
@@ -107,11 +114,11 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         List<ExecutionResult> results = new ArrayList<>();
         try (Stream<Path> files = Files.list(baseDir)) {
-            files.filter(Files::isRegularFile)
+            files.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS))
                     .filter(p -> p.getFileName().toString().endsWith(SUFFIX))
                     .forEach(p -> {
-                        try {
-                            results.add(mapper.readValue(p.toFile(), ExecutionResult.class));
+                        try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
+                            results.add(mapper.readValue(in, ExecutionResult.class));
                         } catch (IOException ignored) {
                             // Skip files that fail to parse; they may be partial
                             // writes or unrelated documents.

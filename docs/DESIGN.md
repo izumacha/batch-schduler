@@ -70,6 +70,33 @@ goes all the way through execution and persistence; `list` reads stored results.
   standalone JSON document keyed by run id. This keeps the store trivially simple,
   human-readable, and easy to back up or inspect, with no database dependency.
 
+## Security & trust model
+
+`batch-scheduler` executes the commands defined in a batch file. **The batch
+configuration is trusted input** — like a `Makefile` or a CI pipeline, it is
+authored by the operator who runs the tool, and by design it can run arbitrary
+commands, with arbitrary environment variables and working directories. The tool
+does not, and is not intended to, sandbox those commands. Do not feed it batch
+files from untrusted sources.
+
+Within that model, the implementation still defends against accidental and
+malicious resource exhaustion and against tampering with the state directory:
+
+- **Bounded config parsing.** The YAML parser is configured with an explicit
+  document-size limit (`MAX_CONFIG_BYTES`, 4 MiB), an alias-count limit (defends
+  against "billion laughs" alias-expansion bombs), a nesting-depth limit, and
+  recursive keys disabled. Oversized files are rejected before being read whole.
+- **Bounded output capture.** Each job's combined output is drained on a
+  dedicated thread (so a full pipe never blocks the child) and only a bounded
+  tail is retained; an individual line is capped so a single runaway line cannot
+  exhaust memory.
+- **Iterative graph algorithms.** Validation, cycle detection, and topological
+  sort are iterative, so a deeply-nested or very long dependency chain cannot
+  overflow the call stack.
+- **State-directory safety.** Run ids are validated to reject path separators and
+  `..` so a record can never be written or read outside the state directory.
+  Writes go through a temp file and an atomic move; reads do not follow symlinks.
+
 ## Future extensions
 
 - **Parallel execution** of independent jobs (run ready jobs concurrently while

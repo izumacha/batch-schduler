@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.exc.ValueInstantiationException;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.izumacha.batch.model.Batch;
+import org.yaml.snakeyaml.LoaderOptions;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -27,10 +28,23 @@ import java.nio.file.Path;
  */
 public final class BatchConfigLoader {
 
+    /** Upper bound on a config document, guarding against memory-exhaustion DoS. */
+    static final int MAX_CONFIG_BYTES = 4 * 1024 * 1024; // 4 MiB
+
     private final ObjectMapper mapper;
 
     public BatchConfigLoader() {
-        this.mapper = new ObjectMapper(new YAMLFactory())
+        // Bound the parser so a hostile or accidental "YAML bomb" cannot exhaust
+        // memory: cap the document size, the number of aliases (billion-laughs),
+        // and nesting depth, and forbid recursive keys.
+        LoaderOptions loaderOptions = new LoaderOptions();
+        loaderOptions.setCodePointLimit(MAX_CONFIG_BYTES);
+        loaderOptions.setMaxAliasesForCollections(50);
+        loaderOptions.setNestingDepthLimit(100);
+        loaderOptions.setAllowRecursiveKeys(false);
+        YAMLFactory yamlFactory = YAMLFactory.builder().loaderOptions(loaderOptions).build();
+
+        this.mapper = new ObjectMapper(yamlFactory)
                 .registerModule(new JavaTimeModule())
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
@@ -47,6 +61,12 @@ public final class BatchConfigLoader {
         }
         String content;
         try {
+            // Reject oversized files before reading them whole into memory.
+            long size = Files.size(path);
+            if (size > MAX_CONFIG_BYTES) {
+                throw new ConfigException("batch config file is too large: " + path
+                        + " (" + size + " bytes, limit " + MAX_CONFIG_BYTES + ")");
+            }
             content = Files.readString(path);
         } catch (IOException e) {
             throw new ConfigException(

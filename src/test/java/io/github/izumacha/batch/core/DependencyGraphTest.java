@@ -33,6 +33,36 @@ class DependencyGraphTest {
     }
 
     @Test
+    void veryLongChainDoesNotOverflowTheStack() {
+        // A deep linear chain must be validated and ordered iteratively, without
+        // a StackOverflowError (regression guard for recursive cycle detection).
+        int n = 50_000;
+        List<Job> jobs = new java.util.ArrayList<>(n);
+        jobs.add(job("j0", List.of()));
+        for (int i = 1; i < n; i++) {
+            jobs.add(job("j" + i, List.of("j" + (i - 1))));
+        }
+        DependencyGraph g = DependencyGraph.build(new Batch("deep", jobs));
+        List<String> order = orderIds(g);
+        assertEquals(n, order.size());
+        assertEquals("j0", order.get(0));
+        assertEquals("j" + (n - 1), order.get(n - 1));
+    }
+
+    @Test
+    void cycleDeepInALongChainIsStillDetected() {
+        int n = 10_000;
+        List<Job> jobs = new java.util.ArrayList<>(n);
+        jobs.add(job("j0", List.of("j" + (n - 1)))); // closes the loop at the end
+        for (int i = 1; i < n; i++) {
+            jobs.add(job("j" + i, List.of("j" + (i - 1))));
+        }
+        ValidationException ex = assertThrows(ValidationException.class,
+                () -> DependencyGraph.build(new Batch("deepcycle", jobs)));
+        assertTrue(ex.errors().stream().anyMatch(e -> e.contains("cycle")), ex.getMessage());
+    }
+
+    @Test
     void diamondTopoOrderIsDeterministicByDeclaration() {
         // a -> b, a -> c, b&c -> d. b declared before c.
         Batch batch = new Batch("diamond", List.of(

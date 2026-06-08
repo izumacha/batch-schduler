@@ -99,6 +99,18 @@ class JobRunnerTest {
     }
 
     @Test
+    void hugeSingleOutputLineIsBoundedNotLoadedWhole() {
+        // A process emitting one enormous line must not exhaust memory: the
+        // captured tail is bounded and the job still completes normally.
+        Job j = job("flood", List.of("sh", "-c",
+                "head -c 5000000 /dev/zero | tr '\\0' 'x'; echo; exit 0"), 0, 0);
+        JobResult r = fastRunner().run(j);
+        assertEquals(JobStatus.SUCCEEDED, r.status());
+        // Message stays small despite ~5 MB of output on a single line.
+        assertTrue(r.message().length() < 64 * 1024, "message length=" + r.message().length());
+    }
+
+    @Test
     void invalidEnvKeyIsReportedAsFailureNotThrown() {
         // A key containing '=' is rejected by ProcessBuilder; it must surface as
         // a FAILED result rather than crashing the batch.
