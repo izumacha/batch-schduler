@@ -1,0 +1,155 @@
+package io.github.izumacha.batch.state;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.github.izumacha.batch.model.ExecutionResult;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Stream;
+
+/**
+ * File-backed {@link ExecutionStore} that persists one pretty-printed JSON
+ * document per run, named {@code <runId>.json}, under a base directory.
+ *
+ * <p>Instants are written as ISO-8601 strings (timestamps disabled) and reads
+ * tolerate unparseable files by skipping them.
+ */
+public final class JsonExecutionStore implements ExecutionStore {
+
+    private static final String SUFFIX = ".json";
+    /** Fixed temp-file prefix; must be >= 3 chars for {@link Files#createTempFile}. */
+    private static final String TMP_PREFIX = "run-";
+
+    private final Path baseDir;
+    private final ObjectMapper mapper;
+
+    public JsonExecutionStore(Path baseDir) {
+        if (baseDir == null) {
+            throw new IllegalArgumentException("baseDir must not be null");
+        }
+        this.baseDir = baseDir;
+        this.mapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .enable(SerializationFeature.INDENT_OUTPUT)
+                // Tolerate fields written by newer versions (forward compatibility).
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        try {
+            Files.createDirectories(baseDir);
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "failed to create execution store directory: " + baseDir, e);
+        }
+    }
+
+    @Override
+    public void save(ExecutionResult result) {
+        if (result == null) {
+            throw new IllegalArgumentException("result must not be null");
+        }
+        if (result.runId() == null || result.runId().isBlank()) {
+            throw new IllegalArgumentException("result.runId must not be null or blank");
+        }
+        try {
+            Files.createDirectories(baseDir);
+            Path target = fileFor(result.runId());
+            // Write to a temp file in the same directory, then move atomically
+            // so readers never observe a half-written file.
+            // Prefix is independent of runId: createTempFile requires >= 3 chars,
+            // but a runId may be as short as one character.
+            Path tmp = Files.createTempFile(baseDir, TMP_PREFIX, ".tmp");
+            try {
+                mapper.writeValue(tmp.toFile(), result);
+                try {
+                    Files.move(tmp, target,
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException atomicFailed) {
+                    // Some filesystems don't support atomic moves; fall back.
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "failed to save execution result '" + result.runId() + "' under " + baseDir, e);
+        }
+    }
+
+    @Override
+    public Optional<ExecutionResult> findById(String runId) {
+        if (runId == null || runId.isBlank()) {
+            return Optional.empty();
+        }
+        Path file = fileFor(runId);
+        // Do not follow symlinks: only read a regular file that lives directly in
+        // the state directory, never a link an attacker may have swapped in.
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.empty();
+        }
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return Optional.of(mapper.readValue(in, ExecutionResult.class));
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "failed to read execution result '" + runId + "' from " + file, e);
+        }
+    }
+
+    @Override
+    public List<ExecutionResult> findAll() {
+        if (!Files.isDirectory(baseDir)) {
+            return List.of();
+        }
+        List<ExecutionResult> results = new ArrayList<>();
+        try (Stream<Path> files = Files.list(baseDir)) {
+            files.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS))
+                    .filter(p -> p.getFileName().toString().endsWith(SUFFIX))
+                    .forEach(p -> {
+                        try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
+                            results.add(mapper.readValue(in, ExecutionResult.class));
+                        } catch (IOException ignored) {
+                            // Skip files that fail to parse; they may be partial
+                            // writes or unrelated documents.
+                        }
+                    });
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "failed to list execution results under " + baseDir, e);
+        }
+        results.sort(ExecutionResults.BY_STARTED_AT_DESC);
+        return results;
+    }
+
+    /**
+     * Resolves the file for a run id, guarding against path traversal: a runId
+     * is untrusted input (the store is public and accepts externally-built
+     * {@link ExecutionResult}s), so a value like {@code "../escape"} must never
+     * read or write outside {@code baseDir}.
+     */
+    private Path fileFor(String runId) {
+        if (runId.contains("/") || runId.contains("\\")
+                || runId.contains("..") || runId.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(
+                    "invalid runId '" + runId + "': must not contain path separators or '..'");
+        }
+        Path base = baseDir.toAbsolutePath().normalize();
+        Path resolved = base.resolve(runId + SUFFIX).normalize();
+        if (!base.equals(resolved.getParent())) {
+            throw new IllegalArgumentException(
+                    "invalid runId '" + runId + "': resolves outside the state directory");
+        }
+        return resolved;
+    }
+}
