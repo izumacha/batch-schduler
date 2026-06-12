@@ -137,19 +137,27 @@ public final class DependencyGraph {
         return new DependencyGraph(batch, dependencies, declarationIndex);
     }
 
+    // DFS ノードの訪問状態を表す名前付き定数（int で管理してスタック使用量を最小化する）
+    /** ノードがまだ DFS で訪問されていない状態 */
+    private static final int NODE_STATE_UNVISITED = 0;
+    /** ノードが現在の DFS パス上にある（処理中）状態 */
+    private static final int NODE_STATE_IN_PROGRESS = 1;
+    /** ノードの DFS が完了した状態 */
+    private static final int NODE_STATE_DONE = 2;
+
     // 繰り返し DFS（深さ優先探索）で循環を検出するプライベートメソッド
     private static void detectCycles(Map<String, Integer> declarationIndex,
                                      Map<String, Set<String>> dependencies,
                                      List<String> errors) {
-        // 0 = 未訪問、1 = 処理中（現在の DFS パス上）、2 = 完了
+        // NODE_STATE_UNVISITED / IN_PROGRESS / DONE の 3 状態でノードを管理する
         // スタックオーバーフローを防ぐために再帰ではなく明示的なスタックを使う
         Map<String, Integer> state = new HashMap<>();
         // 同じ循環を複数回報告しないための追跡セット
         Set<String> reportedCycles = new HashSet<>();
         // 決定的な循環報告のために宣言順で走査する
         for (String start : declarationIndex.keySet()) {
-            // すでに処理済みのノードはスキップする
-            if (state.getOrDefault(start, 0) != 0) {
+            // すでに処理済みのノードはスキップする（UNVISITED 以外）
+            if (state.getOrDefault(start, NODE_STATE_UNVISITED) != NODE_STATE_UNVISITED) {
                 continue;
             }
             // DFS のスタック（各要素は現在ノードの依存イテレータ）
@@ -158,7 +166,7 @@ public final class DependencyGraph {
             Deque<String> path = new ArrayDeque<>();
 
             // 開始ノードを「処理中」に設定してスタックに積む
-            state.put(start, 1);
+            state.put(start, NODE_STATE_IN_PROGRESS);
             path.push(start);
             // 開始ノードの依存イテレータをスタックに積む
             iterators.push(dependencies.getOrDefault(start, Set.of()).iterator());
@@ -171,23 +179,23 @@ public final class DependencyGraph {
                 if (it.hasNext()) {
                     // 次の依存 ID を取得する
                     String dep = it.next();
-                    // その依存ノードの状態を確認する
-                    int depState = state.getOrDefault(dep, 0);
+                    // その依存ノードの状態を取得する（未記録なら UNVISITED）
+                    int depState = state.getOrDefault(dep, NODE_STATE_UNVISITED);
                     // 未訪問なら処理中に設定してスタックに積む
-                    if (depState == 0) {
-                        state.put(dep, 1);
+                    if (depState == NODE_STATE_UNVISITED) {
+                        state.put(dep, NODE_STATE_IN_PROGRESS);
                         path.push(dep);
                         iterators.push(dependencies.getOrDefault(dep, Set.of()).iterator());
-                    } else if (depState == 1) {
+                    } else if (depState == NODE_STATE_IN_PROGRESS) {
                         // 後退辺（バックエッジ）: dep は現在のパス上にあるので循環を報告する
                         reportCycle(dep, path, reportedCycles, errors);
                     }
-                    // depState == 2 は処理完了済みのため何もしない
+                    // NODE_STATE_DONE は処理完了済みのため何もしない
                 } else {
                     // このノードの依存をすべて処理し終えたのでスタックから取り出す
                     iterators.pop();
                     // パスからも取り出して「完了」状態にする
-                    state.put(path.pop(), 2);
+                    state.put(path.pop(), NODE_STATE_DONE);
                 }
             }
         }
