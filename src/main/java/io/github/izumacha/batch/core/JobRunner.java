@@ -30,10 +30,15 @@ public final class JobRunner {
 
     // キャプチャするプロセス出力の最大行数（デフォルト値）
     private static final int DEFAULT_MAX_CAPTURED_OUTPUT_LINES = 50;
+    // 読み取りバッファサイズ（4KiB）。マジックナンバー 4096 を定数化して意図を明示する
+    private static final int READ_BUFFER_CHARS = 4 * 1024;
     // リトライ前に待機する時間（デフォルト1秒）
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
+    // killTree 後にリーダースレッドが終了するのを待つ短い猶予時間（ミリ秒）
+    // プロセスを強制終了した直後に残りの出力を読み取るための短い待機時間
+    private static final long KILL_WAIT_MILLIS = 200L;
 
     // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
@@ -184,8 +189,8 @@ public final class JobRunner {
                     if (!cleanedUp) {
                         LOGGER.warning("Process did not exit within cleanup window after kill for job: " + job.id());
                     }
-                    // リーダースレッドも少しだけ待機してキャプチャ済みの出力を取得する
-                    joinQuietly(reader, Duration.ofMillis(200));
+                    // リーダースレッドも KILL_WAIT_MILLIS ミリ秒だけ待機してキャプチャ済みの出力を取得する
+                    joinQuietly(reader, Duration.ofMillis(KILL_WAIT_MILLIS));
                     // タイムアウト結果を返す
                     return Attempt.timedOut(
                             "timed out after " + job.timeoutSeconds() + "s",
@@ -351,8 +356,8 @@ public final class JobRunner {
             // ただしパイプはすべてドレインするのでプロセスがブロックすることはない。
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                // 4KB の読み込みバッファを用意する
-                char[] buf = new char[4096];
+                // READ_BUFFER_CHARS 文字分の読み込みバッファを用意する（4KiB）
+                char[] buf = new char[READ_BUFFER_CHARS];
                 // 現在構築中の行を格納する StringBuilder を作成する
                 StringBuilder line = new StringBuilder();
                 // 現在の行が切り詰められたかどうかのフラグ

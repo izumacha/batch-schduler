@@ -31,6 +31,10 @@ public final class BatchConfigLoader {
     /** Upper bound on a config document, guarding against memory-exhaustion DoS. */
     // YAML ファイルの最大サイズ（4MiB）。これを超えるファイルは読み込みを拒否してメモリ枯渇を防ぐ
     static final int MAX_CONFIG_BYTES = 4 * 1024 * 1024; // 4 MiB
+    // YAML エイリアス（繰り返し参照）の最大数（billion-laughs 攻撃への対策）
+    private static final int MAX_YAML_ALIASES = 50;
+    // YAML のネスト深度の上限（深すぎる構造による解析遅延を防ぐ）
+    private static final int MAX_YAML_NESTING_DEPTH = 100;
 
     // Jackson の ObjectMapper インスタンス（YAML/JSON 双方のパースに使う）
     private final ObjectMapper mapper;
@@ -43,10 +47,10 @@ public final class BatchConfigLoader {
         LoaderOptions loaderOptions = new LoaderOptions();
         // コードポイント数の上限を設定する（= ファイルサイズ上限と同じ値）
         loaderOptions.setCodePointLimit(MAX_CONFIG_BYTES);
-        // エイリアス（繰り返し参照）の最大数を制限する（billion-laughs 攻撃への対策）
-        loaderOptions.setMaxAliasesForCollections(50);
-        // ネストの深さを制限する（深すぎると解析が遅くなるので上限を設ける）
-        loaderOptions.setNestingDepthLimit(100);
+        // エイリアス（繰り返し参照）の最大数を MAX_YAML_ALIASES に制限する（billion-laughs 攻撃への対策）
+        loaderOptions.setMaxAliasesForCollections(MAX_YAML_ALIASES);
+        // ネストの深さを MAX_YAML_NESTING_DEPTH に制限する（深すぎると解析が遅くなるので上限を設ける）
+        loaderOptions.setNestingDepthLimit(MAX_YAML_NESTING_DEPTH);
         // 再帰的なキー（循環参照）を禁止する
         loaderOptions.setAllowRecursiveKeys(false);
         // 上記オプションを組み込んだ YAMLFactory を生成する
